@@ -4,14 +4,21 @@ import healpy as hp
 import os
 import pickle
 
-#Other dependences
+#other dependences
 import sys
 sys.path.insert(0, '../obs_eff_codes/')
 import snr_mag_lsst as sml
 
+#dependences for dust:
+import dustmaps
+from dustmaps.sfd import SFDQuery
+from astropy.coordinates import SkyCoord
+from dustmaps.config import config
+config['data_dir'] = '/global/cfs/cdirs/lsst/groups/PZ/PhotoZDC2/run2.2i_dr6_test/TESTDUST/mapdata' #update this path when dustmaps are copied to a more stable location!
+
 
 #functions:
-def scan_over_tracts(required_pixels, mag_bins, pz_bins, indir, nside=128):
+def scan_over_tracts(required_pixels, mag_bins, pz_bins, indir, nside=128, dered=False):
     """
     ===INPUTS===
     
@@ -96,7 +103,11 @@ def scan_over_tracts(required_pixels, mag_bins, pz_bins, indir, nside=128):
             cat_pix=hp.ang2pix(nside, ra, dec, lonlat=True)
             #anymore selection to pass on? e.g. i magnitude > 24
             imag=fin[1].data['mag_i_cModel']
-            selmag = np.where(imag>24)[0]
+            selmag = np.where(imag>24)[0] 
+            
+            #if deredden needed, compute the dereddened magnitudes for the catalogue:
+            #if dered==True:
+                #mag_dered_matrix = deredden_magnitudes(fin)
             
             for syskey in systematics_keys:
                 band = syskey[0]
@@ -114,7 +125,7 @@ def scan_over_tracts(required_pixels, mag_bins, pz_bins, indir, nside=128):
                     sel=np.intersect1d(sel, selmag)
 
                     if len(sel)>0:
-                        catalog_prop_dist=get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band=band)
+                        catalog_prop_dist=get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band=band, dered=dered)
                         #for each key, this will return a M*3 array where M is the number of binning in mag_bins or pz_bins
                         for key in catalog_prop_dist.keys():
                             #now prop_dist_alltracts[key] is nquantiles*M*3 array
@@ -144,7 +155,7 @@ def scan_over_tracts(required_pixels, mag_bins, pz_bins, indir, nside=128):
     return MEANOUT, STDOUT
 
 
-def get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band = 'u'):
+def get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band = 'u', dered = False):
     
     #preset props
     #binned in magnitudes, or photo-z
@@ -156,14 +167,22 @@ def get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band = 'u'):
             #check which quantity to bin:
             if 'magerr' in key:
                 bins = mag_bins[band]
-                binkey = 'mag_%s_cModel'%band
                 outkey = key
+                #now check if need to redden:
+                binkey = 'mag_%s_cModel'%band
+                
+                if dered == False:
+                    digi = np.digitize(fin[1].data[binkey][sel], bins)
+                elif dered == True:
+                    usemg = deredden_magnitudes(fin, sel, band=band)
+                    digi = np.digitize(usemg, bins)
+                                                
             if 'redshift' in key:
                 bins = pz_bins
                 binkey = 'photoz_mode'
                 outkey = key+'-%s'%band
-                
-            digi = np.digitize(fin[1].data[binkey][sel], bins)
+            
+                digi = np.digitize(fin[1].data[binkey][sel], bins)
         
             #calculate mean, meansq, and ndata for each magnitude band:
             catalog_prop_dist[outkey] = np.zeros(((len(bins)-1), 3))
@@ -183,11 +202,19 @@ def get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band = 'u'):
             bins = mag_bins[band]
             binkey = 'mag_%s_cModel'%band
             
-            meas=fin[1].data[item[0]][sel]
+            if dered == False:
+                meas=fin[1].data[item[0]][sel]
+            elif dered == True:
+                meas = deredden_magnitudes(fin, sel, band=band)
+            
             true=fin[1].data[item[1]][sel]
             diff=meas-true
             
-            digi = np.digitize(fin[1].data[binkey][sel], bins)
+            if dered == False:
+                digi = np.digitize(fin[1].data[binkey][sel], bins)
+            elif dered == True:
+                usemg = deredden_magnitudes(fin, sel, band=band)
+                digi = np.digitize(usemg, bins)
             
             catalog_prop_dist[key] = np.zeros(((len(bins)-1), 3))
             for kk in range(len(bins)-1):
@@ -202,6 +229,23 @@ def get_mean_meansq_len(fin, sel, props, mag_bins, pz_bins, band = 'u'):
     
     return catalog_prop_dist
 
+
+#de-redden routine here:
+def deredden_magnitudes(df, sel, band='u'):
+    # set the A_lamba/E(B-V) values for the six LSST filters 
+    maglist = np.array(['u','g','r','i','z','y'])
+    band_a_ebv = np.array([4.81,3.64,2.70,2.06,1.58,1.31])
+    
+    coords = SkyCoord(df[1].data['ra'][sel], df[1].data['dec'][sel], unit = 'deg',frame='fk5')
+    sfd = SFDQuery()
+    ebvvec = sfd(coords)
+    #df['ebv'] = ebvvec
+    
+    ind = np.where(maglist == band)
+    #for i,band in enumerate(['u','g','r','i','z','y']):
+    mag_dered= df[1].data[f'mag_{band}_cModel'][sel]-ebvvec*band_a_ebv[ind]
+    
+    return mag_dered
 
 
 
